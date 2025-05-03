@@ -19,6 +19,7 @@ openssl=3.0.16=h02f6b3c_0
 pip=25.1=pyhc872135_2
 python=3.13.2=h4862095_100_cp313
 python-telegram-bot=22.0=pypi_0
+python-telegram-bot[job-queue]=22.0=pypi_0
 python_abi=3.13=0_cp313
 readline=8.2=h1a28f6b_0
 setuptools=78.1.1=py313hca03da5_0
