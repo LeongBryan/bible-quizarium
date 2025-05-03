@@ -16,7 +16,7 @@ import json
 
 os.environ["SSL_CERT_FILE"] = "./cacert-2025-02-25.pem" # hack to fix SSL error. Shouldn't need this in production.
 
-TOKEN = ""
+TOKEN = "dont-forget-this"
 
 # ------ Bot Functions ------
 async def start(update: Update, context: CallbackContext):
