@@ -1,19 +1,21 @@
 #!/usr/bin/env python
 
-import asyncio
 import json
 import random
 import sqlite3
 import os
-from telegram import Update
+from apscheduler.jobstores.base import JobLookupError
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
     CallbackContext,
+    CallbackQueryHandler,
     filters
 )
 from datetime import datetime
+import gsheet
 
 import logging
 logging.basicConfig(
@@ -22,6 +24,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+VALID_CATEGORIES = ['General', 'OT', 'NT']
 
 ### DEBUGGING ###############################################################
 def debug_string(s):
@@ -46,227 +49,462 @@ os.environ["SSL_CERT_FILE"] = "./cacert-2025-02-25.pem"  # SSL fix
 
 TOKEN = ""
 
-# ------ Bot Functions ------
+
+##############
+# START QUIZ #
+##############
+
 async def start(update: Update, context: CallbackContext):
-    await update.message.reply_text(
-        "🎉 Welcome to Quiz Bot!\n"
-        "Use /quiz <category> to start (e.g., /quiz science).\n"
-        "Categories: science, geography, math\n"
-        "View scores with /leaderboard"
-    )
-
-def fetch_questions(category=None):
-    conn = sqlite3.connect('quiz_bot.db')
-    cursor = conn.cursor()
-    if category:
-        cursor.execute('SELECT question, options, correct_answer FROM questions WHERE category=?', (category,))
-    else:
-        cursor.execute('SELECT question, options, correct_answer FROM questions')
-    questions = cursor.fetchall()
-    conn.close()
-    return questions
-
-def update_score(user_id, chat_id, points, update: Update = None):
-    conn = sqlite3.connect('quiz_bot.db')
-    cursor = conn.cursor()
-    
-    if update:
-        user = update.effective_user
-        cursor.execute('''
-            INSERT INTO users (user_id, username, first_name, last_name)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                username = excluded.username,
-                first_name = excluded.first_name,
-                last_name = excluded.last_name,
-                last_updated = CURRENT_TIMESTAMP
-        ''', (user.id, user.username, user.first_name, user.last_name))
-    
-    cursor.execute('''
-        INSERT INTO scores (user_id, chat_id, score)
-        VALUES (?, ?, ?)
-        ON CONFLICT(user_id, chat_id) DO UPDATE SET score = score + ?
-    ''', (user_id, chat_id, points, points))
-    conn.commit()
-    conn.close()
-
-async def quiz(update: Update, context: CallbackContext):
-    if not context.args:
-        await update.message.reply_text("⚠️ Please specify a category! Example: /quiz science")
+    if context.chat_data.get("quiz") or context.chat_data.get("quiz_setup_pending"): # prevent concurrent quiz setup
+        await update.message.reply_text("⚠️ A quiz is already being set up or in progress. Please finish it first.")
         return
 
-    category = context.args[0].lower()
-    valid_categories = ['science', 'geography', 'math']
-    
-    if category not in valid_categories:
-        await update.message.reply_text(f"⚠️ Invalid category! Choose from: {', '.join(valid_categories)}")
+    context.chat_data["quiz_setup_pending"] = True  # Set flag early to avoid race conditions
+
+    keyboard = [
+        [InlineKeyboardButton(cat.capitalize(), callback_data=f"select_category:{cat}")]
+        for cat in VALID_CATEGORIES
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("📚 Choose a category:", reply_markup=reply_markup)
+
+
+# Callback query handler for category selection
+async def handle_category_selection(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if not data.startswith("select_category:"):
         return
 
-    questions = fetch_questions(category)
-    if len(questions) < 3:
-        await update.message.reply_text("⚠️ Not enough questions in this category!")
+    category = data.split(":")[1]
+    context.user_data["selected_category"] = category
+
+    # Prompt for number of rounds
+    keyboard = [
+        [InlineKeyboardButton("1 Round", callback_data="select_rounds:1")],
+        [InlineKeyboardButton("3 Rounds", callback_data="select_rounds:3")],
+        [InlineKeyboardButton("5 Rounds", callback_data="select_rounds:5")],
+        [InlineKeyboardButton("10 Rounds", callback_data="select_rounds:10")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(f"✅ Category selected: *{category.title()}*\n🎯 Now choose number of rounds:",
+                                  parse_mode="Markdown",
+                                  reply_markup=reply_markup)
+
+async def handle_round_selection(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if not data.startswith("select_rounds:"):
         return
 
-    # Initialize chat_data if not exists
-    if not hasattr(context, 'chat_data'):
-        context.chat_data = {}
+    rounds = int(data.split(":")[1])
+    category = context.user_data.get("selected_category")
+
+    if not category:
+        await query.edit_message_text("⚠️ Missing category. Please use /quiz again.")
+        return
+
+    await query.edit_message_text(f"🧠 Starting quiz: *{category.title()}*, {rounds} rounds!",
+                                  parse_mode="Markdown")
+
+    await start_quiz(update, context, category, rounds)
+
+
+# Actual logic to start the quiz (reused for both direct /quiz and button press)
+async def start_quiz(update: Update, context: CallbackContext, category: str, rounds: int):
+    context.chat_data.pop("quiz_setup_pending", None)
+
+    questions = gsheet.fetch_questions(category, rounds)
+    if len(questions) < rounds:
+        await update.effective_message.reply_text("⚠️ Not enough questions in this category!")
+        return
 
     context.chat_data['quiz'] = {
         'category': category,
         'current_question': 0,
-        'questions': random.sample(questions, 3),
+        'questions': questions,
         'correct_answer': None,
+        'answer_progress': None,
         'answered': False,
-        'chat_id': update.effective_chat.id  # Store chat_id for timeouts
+        'chat_id': update.effective_chat.id,
+        'rounds': rounds,
+        'hint_level': 0,
+        'score_map': {0: 5, 1: 3, 2: 2, 3: 1}  # based on which 8-sec interval it's answered
     }
 
-    await ask_question(context)
+    await ask_question(context, context.chat_data['quiz'])
 
+##################
+# SCORE HANDLING #
+##################
 
-async def ask_question(context: CallbackContext):
-    try:
-        quiz_data = context.chat_data.get('quiz')
-        if not quiz_data or quiz_data['current_question'] >= len(quiz_data['questions']):
-            return await end_quiz(context)
-
-        question_num = quiz_data['current_question'] + 1
-        question, options_json, correct_idx = quiz_data['questions'][quiz_data['current_question']]
-        options = json.loads(options_json)
-        
-        # Store both original and lowercase versions
-        quiz_data['correct_answer'] = options[int(correct_idx)].strip()
-        quiz_data['correct_answer_lower'] = quiz_data['correct_answer'].lower().strip()
-        
-        logger.info(f"New question loaded. Correct answer: '{quiz_data['correct_answer']}'")
-
-        quiz_data['answered'] = False
-
-        await context.bot.send_message(
-            chat_id=quiz_data['chat_id'],
-            text=f"📚 {quiz_data['category'].capitalize()} Quiz (Question {question_num}/3):\n\n"
-                 f"{question}\n\n"
-                 "⌛ First correct answer wins! (Type your answer)"
-        )
-
-        context.job_queue.run_once(
-            question_timeout,
-            30,
-            chat_id=quiz_data['chat_id'],
-            data={'chat_id': quiz_data['chat_id']}
-        )
-    except Exception as e:
-        logger.error(f"Error in ask_question: {e}")
-
-
-async def question_timeout(context: CallbackContext):
-    try:
-        chat_id = context.job.data['chat_id']
-        quiz_data = context.chat_data.get('quiz')
-        
-        if not quiz_data or quiz_data.get('answered', False):
-            return
-
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"⌛ Time's up! Correct answer was: {quiz_data['correct_answer']}\n"
-                 "Moving to next question..."
-        )
-
-        quiz_data['current_question'] += 1
-        await ask_question(context)
-    except Exception as e:
-        print(f"Error in question_timeout: {e}")
-
-async def handle_text_answer(update: Update, context: CallbackContext):
-    try:
-        # Debug incoming message
-        raw_message = update.message.text
-        logger.info(f"Raw message received: '{debug_string(raw_message)}' (length: {len(raw_message)})")
-        
-        # Verify chat_data exists
-        if not hasattr(context, 'chat_data'):
-            logger.error("CRITICAL: context has no chat_data attribute!")
-            return
-        if context.chat_data is None:
-            logger.error("CRITICAL: chat_data is None!")
-            return
-            
-        log_quiz_state(context)  # Log complete state before processing
-        
-        quiz_data = context.chat_data.get('quiz')
-        if not quiz_data:
-            logger.error("No quiz_data found in chat_data")
-            return
-            
-        # Check if answer already received
-        if quiz_data.get('answered', False):
-            logger.info("Ignoring answer - question already answered")
-            return
-            
-        # Get and clean answers
-        user_answer = update.message.text.strip()
-        stored_answer = quiz_data.get('correct_answer', '').strip()
-        
-        logger.info(f"Comparing answers:\nUser: '{debug_string(user_answer)}'\nCorrect: '{debug_string(stored_answer)}'")
-        logger.info(f"Lengths - User: {len(user_answer)}, Correct: {len(stored_answer)}")
-        logger.info(f"Lowercase comparison: {user_answer.lower() == stored_answer.lower()}")
-        logger.info(f"Exact comparison: {user_answer == stored_answer}")
-        
-        # Flexible comparison with multiple checks
-        if (user_answer.lower() == stored_answer.lower() or 
-            user_answer.casefold() == stored_answer.casefold()):
-            
-            quiz_data['answered'] = True
-            update_score(update.effective_user.id, update.effective_chat.id, 1, update)
-            
-            logger.info("Answer matched! Processing correct answer")
-            
-            await update.message.reply_text(
-                f"🎉 @{update.effective_user.username} got it right!\n"
-                f"Correct answer: {stored_answer}\n"
-                "Moving to next question..."
-            )
-            
-            quiz_data['current_question'] += 1
-            await ask_question(context)
-        else:
-            logger.info("Answer didn't match (silently ignored)")
-            
-    except Exception as e:
-        logger.error(f"Exception in handle_text_answer: {str(e)}", exc_info=True)
-
-async def end_quiz(context: CallbackContext):
-    quiz_data = context.chat_data.pop('quiz', None)
+def update_score(context: CallbackContext, user: User, points: int):
+    quiz_data = context.chat_data.get("quiz")
     if not quiz_data:
         return
 
-    await context.bot.send_message(
-        chat_id=quiz_data['chat_id'],
-        text="🎉 Quiz complete!\nCheck /leaderboard to see scores!"
-    )
+    scores = quiz_data.setdefault("scores", {})
 
-async def leaderboard(update: Update, context: CallbackContext):
-    conn = sqlite3.connect('quiz_bot.db')
+    if user.id not in scores:
+        scores[user.id] = {
+            "username": user.username or "",
+            "first_name": user.first_name or "",
+            "last_name": user.last_name or "",
+            "score": 0
+        }
+
+    scores[user.id]["score"] += points
+
+
+def save_game_score(user_id, chat_id, username, first_name, last_name, score):
+    conn = sqlite3.connect("leaderboard.db")
     cursor = conn.cursor()
+
+    # Ensure table exists
     cursor.execute('''
-        SELECT u.user_id, 
-               COALESCE(u.username, u.first_name || ' ' || COALESCE(u.last_name, '')) AS display_name,
-               s.score 
-        FROM scores s
-        JOIN users u ON s.user_id = u.user_id
-        WHERE s.chat_id = ?
-        ORDER BY s.score DESC
-        LIMIT 10
-    ''', (update.effective_chat.id,))
-    
-    top_users = cursor.fetchall()
+        CREATE TABLE IF NOT EXISTS scores (
+            user_id INTEGER,
+            chat_id INTEGER,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            total_score INTEGER DEFAULT 0,
+            games_played INTEGER DEFAULT 0,
+            last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, chat_id)
+        )
+    ''')
+
+    now = datetime.utcnow().isoformat()
+
+    # Try to update existing record
+    cursor.execute('''
+        UPDATE scores
+        SET
+            username = ?,
+            first_name = ?,
+            last_name = ?,
+            total_score = total_score + ?,
+            games_played = games_played + 1,
+            last_updated = ?
+        WHERE user_id = ? AND chat_id = ?
+    ''', (username, first_name, last_name, score, now, user_id, chat_id))
+
+    if cursor.rowcount == 0:
+        # Insert new record
+        cursor.execute('''
+            INSERT INTO scores (user_id, chat_id, username, first_name, last_name, total_score, games_played, last_updated)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+        ''', (user_id, chat_id, username, first_name, last_name, score, now))
+
+    conn.commit()
     conn.close()
 
-    leaderboard_text = "🏆 Leaderboard:\n" + "\n".join(
-        f"{i+1}. {display_name.strip()}: {score} pts"
-        for i, (user_id, display_name, score) in enumerate(top_users)
+
+#####################
+# QUESTION HANDLING #
+#####################
+
+async def ask_question(context: CallbackContext, quiz_data: dict):
+    print("GOT HERE")
+    # quiz_data = context.chat_data.get("quiz")
+    if not quiz_data:
+        print("❌ No quiz_data provided")        
+        return
+
+    # Cancel any existing hint jobs and timeout job to avoid interference
+    for job in quiz_data.get("hint_jobs", []):
+        try:
+            job.schedule_removal()
+        except JobLookupError:
+            pass
+    quiz_data["hint_jobs"] = []
+    
+
+    timeout_job = quiz_data.get("timeout_job")
+    if timeout_job:
+        try:
+            timeout_job.schedule_removal()
+        except JobLookupError:
+            pass
+    quiz_data["timeout_job"] = None
+
+    current = quiz_data["current_question"]
+    total = quiz_data["rounds"]
+    if current >= total:
+        await end_quiz(context, quiz_data)
+        return
+
+    question, answer = quiz_data["questions"][current]
+    quiz_data["correct_answer"] = answer.strip().lower()
+    quiz_data["answered"] = False
+    quiz_data["hint_level"] = 0
+    quiz_data["start_time"] = datetime.now()
+
+    # Build masked answer
+    masked = ["_" if ch.isalnum() else ch for ch in answer]
+    quiz_data["masked"] = masked
+
+    # Show initial question and blanked answer
+    await context.bot.send_message(
+        chat_id=quiz_data["chat_id"],
+        text=f"🧠 *Question {current+1}/{total}*\n\n"
+             f"{question}\n\n"
+             f"`{' '.join(masked)}`",
+        parse_mode="Markdown"
     )
-    await update.message.reply_text(leaderboard_text or "No scores yet!")
+
+    # Schedule hint jobs at 8s, 16s, 24s
+    job_refs = []
+    for i, delay in enumerate([8, 16, 24], start=1):
+        job = context.job_queue.run_once(send_hint, delay, data={'level': i, 'chat_id': quiz_data["chat_id"]})
+        job_refs.append(job)
+
+    # Schedule final timeout
+    timeout = context.job_queue.run_once(question_timeout, 30, data={'chat_id': quiz_data["chat_id"]})
+
+    # Store jobs to cancel later
+    quiz_data["hint_jobs"] = job_refs
+    quiz_data["timeout_job"] = timeout
+
+
+async def send_hint(context: CallbackContext):
+    level = context.job.data["level"]
+    chat_id = context.job.data["chat_id"]
+    chat_data = context.application.chat_data.get(chat_id, {})
+    quiz_data = chat_data.get("quiz")
+
+    if not quiz_data or quiz_data.get("answered"):
+        return
+
+    answer = quiz_data["correct_answer"]
+    masked = quiz_data["masked"]
+    indices = [i for i, c in enumerate(masked) if c == "_"]
+
+    # Reveal 30% of remaining characters (at least 1)
+    to_reveal = max(1, round(0.3 * len(indices)))
+    reveal_indices = random.sample(indices, min(to_reveal, len(indices)))
+
+    for i in reveal_indices:
+        masked[i] = answer[i]
+
+    quiz_data["hint_level"] = level
+    quiz_data["masked"] = masked
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"💡 Hint {level}/3:\n`{' '.join(masked)}`",
+        parse_mode="Markdown"
+    )
+
+async def question_timeout(context: CallbackContext):
+    print("⌛ Timeout triggered")
+    chat_id   = context.job.data["chat_id"]
+    chat_data = context.application.chat_data.get(chat_id, {})
+    quiz_data = chat_data.get("quiz")
+
+    # if quiz was already answered or missing, do nothing
+    if not quiz_data or quiz_data.get("answered"):
+        return
+
+    # mark this round finished
+    quiz_data["answered"] = True
+    answer = quiz_data["correct_answer"]
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"⌛ Time's up! The correct answer was: *{answer}*",
+        parse_mode="Markdown"
+    )
+
+    # advance the index
+    quiz_data["current_question"] += 1
+
+    # 👉 if we've reached (or passed) total rounds, end the quiz
+    if quiz_data["current_question"] >= quiz_data["rounds"]:
+        await end_quiz(context, quiz_data)           # or end_quiz(context, quiz_data) if your signature needs it
+        return
+
+    # otherwise ask the next question
+    await ask_question(context, quiz_data)
+
+
+
+def is_answer_correct(user_answer: str, correct_answer: str) -> bool:
+    if not user_answer or not correct_answer:
+        return False
+    # Normalize and compare
+    return user_answer.strip().lower() == correct_answer.strip().lower()
+
+
+async def handle_text_answer(update: Update, context: CallbackContext):
+    chat_data = context.chat_data  # per-chat context
+    quiz_data = chat_data.get("quiz")
+
+    if not quiz_data:
+        print("❌ No quiz_data found")
+        return
+
+    if not update.message or not update.message.text:
+        print("⚠️ No message text received")
+        return
+
+    user_answer = update.message.text
+    correct_answer = quiz_data.get("correct_answer")
+
+    print(f"✅ Received answer: {user_answer}")
+    print(f"✅ Expected answer: {correct_answer}")
+
+    if is_answer_correct(user_answer, correct_answer):
+        quiz_data["answered"] = True
+        
+        for job in quiz_data.get("hint_jobs", []):
+            try:
+                job.schedule_removal()
+            except JobLookupError:
+                pass
+        quiz_data["hint_jobs"] = []
+
+        timeout_job = quiz_data.get("timeout_job")
+        if timeout_job:
+            try:
+                timeout_job.schedule_removal()
+            except JobLookupError:
+                pass
+        quiz_data["timeout_job"] = None
+        
+        hint_level = quiz_data.get("hint_level", 0)
+        score_map = quiz_data.get("score_map", {0: 5, 1: 3, 2: 2, 3: 1})
+        score = score_map.get(hint_level, 1)
+
+        update_score(context, update.effective_user, score)
+
+        await update.message.reply_text(
+            f"🎉 @{update.effective_user.username or update.effective_user.first_name} got it right!\n"
+            f"✅ Answer: {correct_answer}\n"
+            f"🏅 Points: {score}\n"
+            f"➡️ Next question coming up..."
+        )
+
+        quiz_data["current_question"] += 1
+        await ask_question(context, quiz_data)
+    else:
+        print("❌ Incorrect answer (ignored)")
+
+
+
+############
+# END QUIZ #
+############
+async def end_quiz(context: CallbackContext, quiz_data: dict):
+    # Optional cleanup
+    context.application.chat_data.get(quiz_data["chat_id"], {}).pop("quiz_setup_pending", None)
+    context.application.chat_data.get(quiz_data["chat_id"], {}).pop("quiz", None)
+
+    chat_id = quiz_data["chat_id"]
+    scores = quiz_data.get("scores", {})
+
+    if not scores:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="🛑 Quiz ended. No one scored any points!"
+        )
+        return
+
+    # Sort by score descending
+    sorted_scores = sorted(scores.items(), key=lambda x: x[1]["score"], reverse=True)
+
+    lines = []
+    for user_id, data in sorted_scores:
+        username = data.get("username") or f"{data.get('first_name', '')} {data.get('last_name', '')}".strip()
+        display = f"@{username}" if username.startswith("@") else username
+        score = data["score"]
+
+        lines.append(f"🏅 {display}: {score} point{'s' if score != 1 else ''}")
+
+        save_game_score(
+            user_id=user_id,
+            chat_id=chat_id,
+            username=data.get("username", ""),
+            first_name=data.get("first_name", ""),
+            last_name=data.get("last_name", ""),
+            score=score
+        )
+
+    leaderboard_text = "\n".join(lines)
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"🎉 Quiz complete!\n\n{leaderboard_text}\n\n📊 Check /leaderboard for all-time stats!"
+    )
+
+
+
+###############
+# LEADERBOARD #
+###############
+
+import pandas as pd
+from telegram import Update
+from telegram.ext import CallbackContext
+import sqlite3
+
+async def leaderboard(update: Update, context: CallbackContext):
+    chat_id = update.effective_chat.id
+
+    # Load scores from DB
+    conn = sqlite3.connect("leaderboard.db")
+    df = pd.read_sql_query(
+        "SELECT * FROM scores WHERE chat_id = ?", conn, params=(chat_id,)
+    )
+    conn.close()
+
+    if df.empty:
+        await update.message.reply_text("No leaderboard data yet! Play a quiz to get started.")
+        return
+
+    # Construct display_name: use username if present, otherwise fall back to first + last name
+    df["display_name"] = df["username"].fillna("")
+    fallback_names = (df["first_name"].fillna("") + " " + df["last_name"].fillna("")).str.strip()
+    df["display_name"] = df["display_name"].mask(df["display_name"] == "", fallback_names)
+
+    # 🏆 Top Total Scores
+    top_total = df.sort_values("total_score", ascending=False).head(5)
+    total_text = "\n".join(
+        f"{i+1}. {row['display_name']}: {row['total_score']} pts"
+        for i, row in top_total.iterrows()
+    )
+
+    # 📊 Top Average Scores
+    df["average_score"] = df["total_score"] / df["games_played"]
+    top_avg = df[df["games_played"] >= 1].sort_values("average_score", ascending=False).head(5)
+    avg_text = "\n".join(
+        f"{i+1}. {row['display_name']}: {row['average_score']:.2f} avg"
+        for i, row in top_avg.iterrows()
+    )
+
+    # 🎮 Most Games Played
+    top_games = df.sort_values("games_played", ascending=False).head(5)
+    games_text = "\n".join(
+        f"{i+1}. {row['display_name']}: {row['games_played']} games"
+        for i, row in top_games.iterrows()
+    )
+
+    # Final message
+    leaderboard_message = (
+        "📊 *Quiz Leaderboard*\n\n"
+        "🏆 *Top Total Scores:*\n" + total_text + "\n\n" +
+        "📈 *Top Average Scores:*\n" + avg_text + "\n\n" +
+        "🎮 *Most Games Played:*\n" + games_text
+    )
+
+    await update.message.reply_text(leaderboard_message, parse_mode="Markdown")
+
+
 
 async def debug_all_messages(update: Update, context: CallbackContext):
     print(f"\nRAW MESSAGE RECEIVED: {update.message.text}")
@@ -277,12 +515,14 @@ async def debug_all_messages(update: Update, context: CallbackContext):
     # Then call your actual handler
     await handle_text_answer(update, context)
 
+
 def main():
     application = ApplicationBuilder().token(TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("quiz", quiz))
     application.add_handler(CommandHandler("leaderboard", leaderboard))
+    application.add_handler(CallbackQueryHandler(handle_category_selection, pattern="^select_category:"))
+    application.add_handler(CallbackQueryHandler(handle_round_selection, pattern="^select_rounds:"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_answer))
 
     # Debug: Print all registered handlers
