@@ -11,7 +11,8 @@
 ### Steps
 1. Run `conda create --name <envname> --file requirements.txt`
 2. Update main.py with token (to be changed)
-3. Run `python main.py`
+3. Create own file locally called leaderboard.db
+4. Run `python main.py`
 
 
 ## TODO:

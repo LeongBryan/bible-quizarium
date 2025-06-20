@@ -18,11 +18,35 @@ from datetime import datetime
 import gsheet
 
 import logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+from logging.handlers import TimedRotatingFileHandler
+
+# Create logger
+logger = logging.getLogger("quizbot")
+logger.setLevel(logging.INFO)
+logger.propagate = False  # Prevent double logging if root logger is used
+
+# Formatter
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+
+# Console Handler (optional)
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(formatter)
+
+# Daily Rotating File Handler
+file_handler = TimedRotatingFileHandler(
+    "quizbot.log",             # Log file base name
+    when="midnight",           # Rotate at midnight
+    interval=1,                # Every day
+    backupCount=7,             # Keep last 7 days of logs
+    encoding='utf-8',
+    utc=True                   # Optional: use UTC time; remove if you prefer local
 )
-logger = logging.getLogger(__name__)
+file_handler.setFormatter(formatter)
+
+# Add handlers
+logger.addHandler(console_handler)
+logger.addHandler(file_handler)
+
 
 VALID_CATEGORIES = ['General', 'OT', 'NT']
 
@@ -160,7 +184,7 @@ def update_score(context: CallbackContext, user: User, points: int):
     scores[user.id]["score"] += points
 
 
-def save_game_score(user_id, chat_id, username, first_name, last_name, score):
+def save_game_score(user_id, chat_id, username, first_name, last_name, score, is_winner=False):
     conn = sqlite3.connect("leaderboard.db")
     cursor = conn.cursor()
 
@@ -174,12 +198,14 @@ def save_game_score(user_id, chat_id, username, first_name, last_name, score):
             last_name TEXT,
             total_score INTEGER DEFAULT 0,
             games_played INTEGER DEFAULT 0,
-            last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
+            wins INTEGER DEFAULT 0,
+            last_updated TEXT,
             PRIMARY KEY (user_id, chat_id)
-        )
+        );
     ''')
 
     now = datetime.utcnow().isoformat()
+    win_increment = 1 if is_winner else 0
 
     # Try to update existing record
     cursor.execute('''
@@ -190,19 +216,24 @@ def save_game_score(user_id, chat_id, username, first_name, last_name, score):
             last_name = ?,
             total_score = total_score + ?,
             games_played = games_played + 1,
+            wins = wins + ?,
             last_updated = ?
         WHERE user_id = ? AND chat_id = ?
-    ''', (username, first_name, last_name, score, now, user_id, chat_id))
+    ''', (username, first_name, last_name, score, win_increment, now, user_id, chat_id))
 
     if cursor.rowcount == 0:
         # Insert new record
         cursor.execute('''
-            INSERT INTO scores (user_id, chat_id, username, first_name, last_name, total_score, games_played, last_updated)
-            VALUES (?, ?, ?, ?, ?, ?, 1, ?)
-        ''', (user_id, chat_id, username, first_name, last_name, score, now))
+            INSERT INTO scores (
+                user_id, chat_id, username, first_name, last_name,
+                total_score, games_played, wins, last_updated
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+        ''', (user_id, chat_id, username, first_name, last_name, score, win_increment, now))
 
     conn.commit()
     conn.close()
+
 
 
 #####################
@@ -387,7 +418,6 @@ async def handle_text_answer(update: Update, context: CallbackContext):
             f"🎉 @{update.effective_user.username or update.effective_user.first_name} got it right!\n"
             f"✅ Answer: {correct_answer}\n"
             f"🏅 Points: {score}\n"
-            f"➡️ Next question coming up..."
         )
 
         quiz_data["current_question"] += 1
@@ -415,8 +445,10 @@ async def end_quiz(context: CallbackContext, quiz_data: dict):
         )
         return
 
-    # Sort by score descending
+    # Sort scores by score descending
     sorted_scores = sorted(scores.items(), key=lambda x: x[1]["score"], reverse=True)
+    top_score = sorted_scores[0][1]["score"]
+    winners = [user_id for user_id, data in sorted_scores if data["score"] == top_score]
 
     lines = []
     for user_id, data in sorted_scores:
@@ -424,7 +456,9 @@ async def end_quiz(context: CallbackContext, quiz_data: dict):
         display = f"@{username}" if username.startswith("@") else username
         score = data["score"]
 
-        lines.append(f"🏅 {display}: {score} point{'s' if score != 1 else ''}")
+        # 🏆 Emoji only for winners
+        prefix = "🏆" if user_id in winners else "🏅"
+        lines.append(f"{prefix} {display}: {score} point{'s' if score != 1 else ''}")
 
         save_game_score(
             user_id=user_id,
@@ -432,7 +466,8 @@ async def end_quiz(context: CallbackContext, quiz_data: dict):
             username=data.get("username", ""),
             first_name=data.get("first_name", ""),
             last_name=data.get("last_name", ""),
-            score=score
+            score=score,
+            is_winner=user_id in winners  # pass True/False
         )
 
     leaderboard_text = "\n".join(lines)
@@ -441,6 +476,7 @@ async def end_quiz(context: CallbackContext, quiz_data: dict):
         chat_id=chat_id,
         text=f"🎉 Quiz complete!\n\n{leaderboard_text}\n\n📊 Check /leaderboard for all-time stats!"
     )
+
 
 
 
@@ -473,47 +509,51 @@ async def leaderboard(update: Update, context: CallbackContext):
     df["display_name"] = df["display_name"].mask(df["display_name"] == "", fallback_names)
 
     # 🏆 Top Total Scores
-    top_total = df.sort_values("total_score", ascending=False).head(5)
+    top_total = df.sort_values("total_score", ascending=False).head(5).reset_index(drop=True)
     total_text = "\n".join(
         f"{i+1}. {row['display_name']}: {row['total_score']} pts"
         for i, row in top_total.iterrows()
     )
 
-    # 📊 Top Average Scores
-    df["average_score"] = df["total_score"] / df["games_played"]
-    top_avg = df[df["games_played"] >= 1].sort_values("average_score", ascending=False).head(5)
-    avg_text = "\n".join(
-        f"{i+1}. {row['display_name']}: {row['average_score']:.2f} avg"
-        for i, row in top_avg.iterrows()
+
+    # 🥇 Top Wins
+    top_wins = df.sort_values("wins", ascending=False).head(5).reset_index(drop=True)
+    wins_text = "\n".join(
+        f"{i+1}. {row['display_name']}: {row['wins']} wins"
+        for i, row in top_wins.iterrows()
     )
 
     # 🎮 Most Games Played
-    top_games = df.sort_values("games_played", ascending=False).head(5)
+    top_games = df.sort_values("games_played", ascending=False).head(5).reset_index(drop=True)
     games_text = "\n".join(
         f"{i+1}. {row['display_name']}: {row['games_played']} games"
         for i, row in top_games.iterrows()
     )
-
-    # Final message
+    
     leaderboard_message = (
         "📊 *Quiz Leaderboard*\n\n"
-        "🏆 *Top Total Scores:*\n" + total_text + "\n\n" +
-        "📈 *Top Average Scores:*\n" + avg_text + "\n\n" +
+        "🏆 *All-time Points:*\n" + total_text + "\n\n" +
+        "🥇 *Most Wins:*\n" + wins_text + "\n\n" +
         "🎮 *Most Games Played:*\n" + games_text
     )
 
     await update.message.reply_text(leaderboard_message, parse_mode="Markdown")
 
 
+async def log_all_messages(update: Update, context: CallbackContext):
+    user = update.effective_user
+    chat = update.effective_chat
+    message = update.message
 
-async def debug_all_messages(update: Update, context: CallbackContext):
-    print(f"\nRAW MESSAGE RECEIVED: {update.message.text}")
-    print(f"Message ID: {update.message.message_id}")
-    print(f"Chat ID: {update.message.chat.id}")
-    print(f"User: {update.effective_user.username}")
-    
-    # Then call your actual handler
+    logger.info("📥 RAW MESSAGE RECEIVED")
+    logger.info(f"Message ID: {message.message_id}")
+    logger.info(f"Chat ID: {chat.id}")
+    logger.info(f"User: {user.username} (ID: {user.id})")
+    logger.info(f"Text: {message.text}")
+
+    # Forward to actual handler
     await handle_text_answer(update, context)
+
 
 
 def main():
@@ -533,7 +573,7 @@ def main():
             for h in application.handlers[handler]:
                 print(f"  - {h.callback.__name__}")
     
-    application.add_handler(MessageHandler(filters.ALL, debug_all_messages), group=99)
+    application.add_handler(MessageHandler(filters.ALL, log_all_messages), group=99)
 
     # ... [add your handlers as above] ...
     print_handlers()  # Debug output
