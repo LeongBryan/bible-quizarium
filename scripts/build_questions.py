@@ -51,12 +51,12 @@ for tab_name in TABS:
             "question": s(row.get("question")),
             "answer": s(row.get("answer")),
             "difficulty": s(row.get("difficulty")),
-            "book": s(row.get("book")),
-            "chapter": s(row.get("chapter")),
-            "verse": s(row.get("verse")),
-            "booknum": s(row.get("booknum")),
+            # "book": s(row.get("book")),
+            # "chapter": s(row.get("chapter")),
+            # "verse": s(row.get("verse")),
+            # "booknum": s(row.get("booknum")),
             "uuid": s(row.get("uuid")),
-            "approved": approved,
+            # "approved": approved,
         }
 
         questions.append(q)
