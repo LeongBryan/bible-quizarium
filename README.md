@@ -1,12 +1,10 @@
 # bible-quizarium
 
-
-
 ## Run Locally
 
 ### Prerequisite
 - Retrieve telegram bot token from admin
-- Retrieve file `bible-quizarium-93d3f0de44fa.json` from admin, leave at root level
+- Create file `.env` at root and set variable `TOKEN=xxx`
 
 ### Steps
 1. Update main.py with token (to be changed)
@@ -17,8 +15,10 @@
 
 ## TODO:
 - questions are repeated sometimes, apparently
-- 2 questions back-to-back with same answer just awards 'correct' to both questions
+- 2 questions back-to-back with same answer just awards 'correct' to both questions. 
 - badly needs refactoring
+- answers end up lower-case everything. It should display as-is.
+ 
 
 ## GitHub Actions Data Pipeline
 ### Overview

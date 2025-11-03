@@ -4,6 +4,7 @@ import json
 import random
 import sqlite3
 import os
+from dotenv import load_dotenv
 from apscheduler.jobstores.base import JobLookupError
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User
 from telegram.ext import (
@@ -15,10 +16,11 @@ from telegram.ext import (
     filters
 )
 from datetime import datetime
-import gsheet
 
 import logging
 from logging.handlers import TimedRotatingFileHandler
+
+import question_handler
 
 # Create logger
 logger = logging.getLogger("quizbot")
@@ -47,8 +49,26 @@ file_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 
+os.environ["SSL_CERT_FILE"] = "./cacert-2025-02-25.pem"  # SSL fix
 
-VALID_CATEGORIES = ['General', 'OT', 'NT']
+load_dotenv()
+TOKEN = os.getenv("TOKEN")
+
+if not TOKEN:
+    raise ValueError("Telegram token not set! Add it to your .env file")
+
+VALID_CATEGORIES = ['All', 'Trivia', 'Verses']
+TYPE_LABELS = {
+    "verse_complete": "Complete the verse",
+    "verse_identify": "Identify the verse",
+    "verse_fact": "Trivia",
+    "book_fact": "Trivia",
+    "character_fact": "Trivia",
+    "location_fact": "Trivia",
+    "number_fact": "Trivia",
+    "general_trivia": "Trivia"
+}
+
 
 ### DEBUGGING ###############################################################
 def debug_string(s):
@@ -67,11 +87,6 @@ def log_quiz_state(context):
     logger.info(f"Quiz State: {json.dumps(quiz_data, indent=2, default=str)}")
 ### DEBUGGING ###############################################################
 
-
-
-os.environ["SSL_CERT_FILE"] = "./cacert-2025-02-25.pem"  # SSL fix
-
-TOKEN = ""
 
 
 ##############
@@ -142,7 +157,9 @@ async def handle_round_selection(update: Update, context: CallbackContext):
 async def start_quiz(update: Update, context: CallbackContext, category: str, rounds: int):
     context.chat_data.pop("quiz_setup_pending", None)
 
-    questions = gsheet.fetch_questions(category, rounds)
+    # questions is a list of tuples: (question, answer, type)
+    questions = question_handler.fetch_questions(category, rounds) 
+    
     if len(questions) < rounds:
         await update.effective_message.reply_text("⚠️ Not enough questions in this category!")
         return
@@ -244,7 +261,7 @@ async def ask_question(context: CallbackContext, quiz_data: dict):
     print("GOT HERE")
     # quiz_data = context.chat_data.get("quiz")
     if not quiz_data:
-        print("❌ No quiz_data provided")        
+        print("~ No quiz_data provided ~")        
         return
 
     # Cancel any existing hint jobs and timeout job to avoid interference
@@ -270,7 +287,7 @@ async def ask_question(context: CallbackContext, quiz_data: dict):
         await end_quiz(context, quiz_data)
         return
 
-    question, answer = quiz_data["questions"][current]
+    question, answer, question_type = quiz_data["questions"][current]
     quiz_data["correct_answer"] = answer.strip().lower()
     quiz_data["answered"] = False
     quiz_data["hint_level"] = 0
@@ -283,7 +300,7 @@ async def ask_question(context: CallbackContext, quiz_data: dict):
     # Show initial question and blanked answer
     await context.bot.send_message(
         chat_id=quiz_data["chat_id"],
-        text=f"🧠 *Question {current+1}/{total}*\n\n"
+        text=f"🧠 *Question {current+1}/{total} [{TYPE_LABELS.get(question_type)}]*\n\n"
              f"{question}\n\n"
              f"`{' '.join(masked)}`",
         parse_mode="Markdown"
@@ -314,6 +331,14 @@ async def send_hint(context: CallbackContext):
 
     answer = quiz_data["correct_answer"]
     masked = quiz_data["masked"]
+
+    # Cap hint levels for short answers
+    max_hint_level = 3
+    if len(answer) < 3:
+        max_hint_level = 1
+    if level > max_hint_level:
+        return  # do not reveal further hints
+
     indices = [i for i, c in enumerate(masked) if c == "_"]
 
     # Reveal 30% of remaining characters (at least 1)
@@ -328,9 +353,10 @@ async def send_hint(context: CallbackContext):
 
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"💡 Hint {level}/3:\n`{' '.join(masked)}`",
+        text=f"💡 Hint {level}/{max_hint_level}:\n`{' '.join(masked)}`",
         parse_mode="Markdown"
     )
+
 
 async def question_timeout(context: CallbackContext):
     print("⌛ Timeout triggered")
