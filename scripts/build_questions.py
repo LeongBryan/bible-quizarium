@@ -89,12 +89,21 @@ if dupes:
     print("❗ Please fix duplicates in the source sheets before re-running.")
     sys.exit(1)
 
+# === Prepare JSON for output ===
+fields_to_keep = ["type", "question", "answer", "difficulty", "uuid"]
+
+# Remove unnecessary fields
+clean_questions = [
+    {k: q[k] for k in fields_to_keep}
+    for q in questions
+]
+
 # === Save combined JSON ===
 os.makedirs("data", exist_ok=True)
 out_path = "data/questions.json"
 with open(out_path, "w", encoding="utf-8") as f:
-    json.dump(questions, f, ensure_ascii=False, indent=2)
+    json.dump(clean_questions, f, ensure_ascii=False, indent=2)
 
-print(f"✅ Built {len(questions)} approved questions from {TABS}")
+print(f"✅ Built {len(clean_questions)} approved questions from {TABS}")
 print(f"📘 Sorted by type → booknum → chapter → verse → question")
 print("🆔 All UUIDs unique ✔️")
