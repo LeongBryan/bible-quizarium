@@ -15,6 +15,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters
 )
+from telegram.helpers import escape_markdown
+
 from datetime import datetime
 
 import logging
@@ -129,7 +131,7 @@ async def handle_category_selection(update: Update, context: CallbackContext):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(f"✅ Category selected: *{category.title()}*\n🎯 Now choose number of rounds:",
-                                  parse_mode="Markdown",
+                                  parse_mode="MarkdownV2",
                                   reply_markup=reply_markup)
 
 async def handle_round_selection(update: Update, context: CallbackContext):
@@ -147,8 +149,10 @@ async def handle_round_selection(update: Update, context: CallbackContext):
         await query.edit_message_text("⚠️ Missing category. Please use /quiz again.")
         return
 
-    await query.edit_message_text(f"🧠 Starting quiz: *{category.title()}*, {rounds} rounds!",
-                                  parse_mode="Markdown")
+    await query.edit_message_text(
+        f"🧠 Starting quiz: *{escape_markdown(category.title(), version=2)}*, {rounds} rounds\!",
+        parse_mode="MarkdownV2"
+    )
 
     await start_quiz(update, context, category, rounds)
 
@@ -161,7 +165,7 @@ async def start_quiz(update: Update, context: CallbackContext, category: str, ro
     questions = question_handler.fetch_questions(category, rounds) 
     
     if len(questions) < rounds:
-        await update.effective_message.reply_text("⚠️ Not enough questions in this category!")
+        await update.effective_message.reply_text("⚠️ Not enough questions in this category\!")
         return
 
     context.chat_data['quiz'] = {
@@ -300,10 +304,10 @@ async def ask_question(context: CallbackContext, quiz_data: dict):
     # Show initial question and blanked answer
     await context.bot.send_message(
         chat_id=quiz_data["chat_id"],
-        text=f"🧠 *Question {current+1}/{total} [{TYPE_LABELS.get(question_type)}]*\n\n"
-             f"{question}\n\n"
-             f"`{' '.join(masked)}`",
-        parse_mode="Markdown"
+        text=f"🧠 *Question {current+1}/{total} \[{escape_markdown(TYPE_LABELS.get(question_type), version=2)}\]*\n\n"
+            f"{escape_markdown(question, version=2)}\n\n"
+            f"`{' '.join(masked)}`",
+        parse_mode="MarkdownV2"
     )
 
     # Schedule hint jobs at 8s, 16s, 24s
@@ -354,7 +358,7 @@ async def send_hint(context: CallbackContext):
     await context.bot.send_message(
         chat_id=chat_id,
         text=f"💡 Hint {level}/{max_hint_level}:\n`{' '.join(masked)}`",
-        parse_mode="Markdown"
+        parse_mode="MarkdownV2"
     )
 
 
@@ -374,8 +378,8 @@ async def question_timeout(context: CallbackContext):
 
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"⌛ Time's up! The correct answer was: *{answer}*",
-        parse_mode="Markdown"
+        text=f'⌛ {escape_markdown("Time\'s up!", version=2)} The correct answer was: *{escape_markdown(answer, version=2)}*',
+        parse_mode="MarkdownV2"
     )
 
     # advance the index
@@ -563,7 +567,7 @@ async def leaderboard(update: Update, context: CallbackContext):
         "🎮 *Most Games Played:*\n" + games_text
     )
 
-    await update.message.reply_text(leaderboard_message, parse_mode="Markdown")
+    await update.message.reply_text(leaderboard_message, parse_mode="MarkdownV2")
 
 
 async def log_all_messages(update: Update, context: CallbackContext):
