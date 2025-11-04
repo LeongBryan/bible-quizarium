@@ -99,8 +99,8 @@ clean_questions = [
 ]
 
 # === Save combined JSON ===
-os.makedirs("data", exist_ok=True)
-out_path = "data/questions.json"
+os.makedirs("app/data", exist_ok=True)
+out_path = "app/data/questions.json"
 with open(out_path, "w", encoding="utf-8") as f:
     json.dump(clean_questions, f, ensure_ascii=False, indent=2)
 

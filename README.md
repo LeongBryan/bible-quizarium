@@ -10,8 +10,18 @@
 1. Update main.py with token (to be changed)
 2. Create own file locally called leaderboard.db
 3. Run `python -m pip install -r requirements.txt`
-4. Run `python main.py`
+4. Run `python app/main.py` from app directory
 
+
+## Deploy to Kubernetes local cluster
+1. Populate the Secret object with API key
+2. Create Namespace, Deployment, pvc, Secret:
+```bash
+k create ns telegram-bot
+k -n telegram-bot apply -f k8s/deployment.yaml
+k -n telegram-bot apply -f k8s/pvc.yaml
+k -n telegram-bot apply -f k8s/secret.yaml
+```
 
 ## TODO:
 - questions are repeated sometimes, apparently
@@ -22,7 +32,7 @@
 
 ## GitHub Actions Data Pipeline
 ### Overview
-The repository includes an automated data pipeline that syncs approved questions from Google Sheets into a single JSON file (data/questions.json). This ensures the bot can load questions locally without making live API calls, improving performance and reliability.
+The repository includes an automated data pipeline that syncs approved questions from Google Sheets into a single JSON file (data/questions.json). This ensures the bot can load questions locally without making live API calls, improving performance and reliability. The logic is in the workflow and uses `./scripts/build_questions.py`
 
 ### Workflow
 - **Trigger**: Manual only (workflow_dispatch) — only maintainers can run it.

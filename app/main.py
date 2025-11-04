@@ -20,7 +20,7 @@ from datetime import datetime
 import logging
 from logging.handlers import TimedRotatingFileHandler
 
-import question_handler
+import question_handler as question_handler
 
 # Create logger
 logger = logging.getLogger("quizbot")
