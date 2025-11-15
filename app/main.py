@@ -15,14 +15,16 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters
 )
-from telegram.helpers import escape_markdown
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import logging
 from logging.handlers import TimedRotatingFileHandler
 
 import question_handler as question_handler
+from database_handler import DatabaseManager
+
+db = DatabaseManager()
 
 # Create logger
 logger = logging.getLogger("quizbot")
@@ -130,9 +132,14 @@ async def handle_category_selection(update: Update, context: CallbackContext):
         [InlineKeyboardButton("10 Rounds", callback_data="select_rounds:10")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(f"✅ Category selected: *{category.title()}*\n🎯 Now choose number of rounds:",
-                                  parse_mode="MarkdownV2",
-                                  reply_markup=reply_markup)
+
+    # Use HTML for message
+    await query.edit_message_text(
+        f"✅ Category selected: <b>{category.title()}</b>\n🎯 Now choose number of rounds:",
+        parse_mode="HTML",
+        reply_markup=reply_markup
+    )
+
 
 async def handle_round_selection(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -150,8 +157,8 @@ async def handle_round_selection(update: Update, context: CallbackContext):
         return
 
     await query.edit_message_text(
-        f"🧠 Starting quiz: *{escape_markdown(category.title(), version=2)}*, {rounds} rounds\!",
-        parse_mode="MarkdownV2"
+        f"🧠 Starting quiz: <b>{category.title()}</b>, {rounds} rounds!",
+        parse_mode="HTML"
     )
 
     await start_quiz(update, context, category, rounds)
@@ -165,7 +172,7 @@ async def start_quiz(update: Update, context: CallbackContext, category: str, ro
     questions = question_handler.fetch_questions(category, rounds) 
     
     if len(questions) < rounds:
-        await update.effective_message.reply_text("⚠️ Not enough questions in this category\!")
+        await update.effective_message.reply_text("⚠️ Not enough questions in this category!", parse_mode="HTML")
         return
 
     context.chat_data['quiz'] = {
@@ -205,65 +212,12 @@ def update_score(context: CallbackContext, user: User, points: int):
     scores[user.id]["score"] += points
 
 
-def save_game_score(user_id, chat_id, username, first_name, last_name, score, is_winner=False):
-    conn = sqlite3.connect("leaderboard.db")
-    cursor = conn.cursor()
-
-    # Ensure table exists
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS scores (
-            user_id INTEGER,
-            chat_id INTEGER,
-            username TEXT,
-            first_name TEXT,
-            last_name TEXT,
-            total_score INTEGER DEFAULT 0,
-            games_played INTEGER DEFAULT 0,
-            wins INTEGER DEFAULT 0,
-            last_updated TEXT,
-            PRIMARY KEY (user_id, chat_id)
-        );
-    ''')
-
-    now = datetime.utcnow().isoformat()
-    win_increment = 1 if is_winner else 0
-
-    # Try to update existing record
-    cursor.execute('''
-        UPDATE scores
-        SET
-            username = ?,
-            first_name = ?,
-            last_name = ?,
-            total_score = total_score + ?,
-            games_played = games_played + 1,
-            wins = wins + ?,
-            last_updated = ?
-        WHERE user_id = ? AND chat_id = ?
-    ''', (username, first_name, last_name, score, win_increment, now, user_id, chat_id))
-
-    if cursor.rowcount == 0:
-        # Insert new record
-        cursor.execute('''
-            INSERT INTO scores (
-                user_id, chat_id, username, first_name, last_name,
-                total_score, games_played, wins, last_updated
-            )
-            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
-        ''', (user_id, chat_id, username, first_name, last_name, score, win_increment, now))
-
-    conn.commit()
-    conn.close()
-
-
-
 #####################
 # QUESTION HANDLING #
 #####################
 
 async def ask_question(context: CallbackContext, quiz_data: dict):
     print("GOT HERE")
-    # quiz_data = context.chat_data.get("quiz")
     if not quiz_data:
         print("~ No quiz_data provided ~")        
         return
@@ -275,7 +229,6 @@ async def ask_question(context: CallbackContext, quiz_data: dict):
         except JobLookupError:
             pass
     quiz_data["hint_jobs"] = []
-    
 
     timeout_job = quiz_data.get("timeout_job")
     if timeout_job:
@@ -301,15 +254,18 @@ async def ask_question(context: CallbackContext, quiz_data: dict):
     masked = ["_" if ch.isalnum() else ch for ch in answer]
     quiz_data["masked"] = masked
 
-    # Show initial question and blanked answer
+    # Send question using HTML
     await context.bot.send_message(
         chat_id=quiz_data["chat_id"],
-        text=f"🧠 *Question {current+1}/{total} \[{escape_markdown(TYPE_LABELS.get(question_type), version=2)}\]*\n\n"
-            f"{escape_markdown(question, version=2)}\n\n"
-            f"`{' '.join(masked)}`",
-        parse_mode="MarkdownV2"
+        text=(
+            f"🧠 <b>Question {current+1}/{total} "
+            f"[{TYPE_LABELS.get(question_type)}]</b>\n\n"
+            f"{question}\n\n"
+            f"<code>{' '.join(masked)}</code>"
+        ),
+        parse_mode="HTML"
     )
-
+    
     # Schedule hint jobs at 8s, 16s, 24s
     job_refs = []
     for i, delay in enumerate([8, 16, 24], start=1):
@@ -355,10 +311,11 @@ async def send_hint(context: CallbackContext):
     quiz_data["hint_level"] = level
     quiz_data["masked"] = masked
 
+    # Send hint using HTML — <code> preserves formatting
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"💡 Hint {level}/{max_hint_level}:\n`{' '.join(masked)}`",
-        parse_mode="MarkdownV2"
+        text=f"💡 Hint {level}/{max_hint_level}:\n<code>{' '.join(masked)}</code>",
+        parse_mode="HTML"
     )
 
 
@@ -376,10 +333,11 @@ async def question_timeout(context: CallbackContext):
     quiz_data["answered"] = True
     answer = quiz_data["correct_answer"]
 
+    # Send timeout message using HTML
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f'⌛ {escape_markdown("Time\'s up!", version=2)} The correct answer was: *{escape_markdown(answer, version=2)}*',
-        parse_mode="MarkdownV2"
+        text=f"⌛ <b>Time's up!</b> The correct answer was: <b>{answer}</b>",
+        parse_mode="HTML"
     )
 
     # advance the index
@@ -387,7 +345,7 @@ async def question_timeout(context: CallbackContext):
 
     # 👉 if we've reached (or passed) total rounds, end the quiz
     if quiz_data["current_question"] >= quiz_data["rounds"]:
-        await end_quiz(context, quiz_data)           # or end_quiz(context, quiz_data) if your signature needs it
+        await end_quiz(context, quiz_data)
         return
 
     # otherwise ask the next question
@@ -490,7 +448,7 @@ async def end_quiz(context: CallbackContext, quiz_data: dict):
         prefix = "🏆" if user_id in winners else "🏅"
         lines.append(f"{prefix} {display}: {score} point{'s' if score != 1 else ''}")
 
-        save_game_score(
+        db.save_score(
             user_id=user_id,
             chat_id=chat_id,
             username=data.get("username", ""),
@@ -519,55 +477,50 @@ from telegram import Update
 from telegram.ext import CallbackContext
 import sqlite3
 
+
 async def leaderboard(update: Update, context: CallbackContext):
     chat_id = update.effective_chat.id
 
-    # Load scores from DB
-    conn = sqlite3.connect("leaderboard.db")
-    df = pd.read_sql_query(
-        "SELECT * FROM scores WHERE chat_id = ?", conn, params=(chat_id,)
-    )
-    conn.close()
+    rows = db.get_leaderboard(chat_id, limit=50)
 
-    if df.empty:
+    if not rows:
         await update.message.reply_text("No leaderboard data yet! Play a quiz to get started.")
         return
 
-    # Construct display_name: use username if present, otherwise fall back to first + last name
-    df["display_name"] = df["username"].fillna("")
-    fallback_names = (df["first_name"].fillna("") + " " + df["last_name"].fillna("")).str.strip()
-    df["display_name"] = df["display_name"].mask(df["display_name"] == "", fallback_names)
+    # Convert rows to dicts (handle sqlite tuples vs postgres dicts)
+    formatted_rows = []
+    for r in rows:
+        if isinstance(r, dict):
+            formatted_rows.append(r)
+        else:
+            formatted_rows.append({
+                "username": r[0] or "Anonymous",
+                "total_score": r[1],
+                "wins": r[2],
+                "games_played": r[3],
+            })
 
-    # 🏆 Top Total Scores
-    top_total = df.sort_values("total_score", ascending=False).head(5).reset_index(drop=True)
-    total_text = "\n".join(
-        f"{i+1}. {row['display_name']}: {row['total_score']} pts"
-        for i, row in top_total.iterrows()
-    )
+    # Helper function to format top N lists
+    def format_top(rows, metric, suffix, top_n=5):
+        top_rows = sorted(rows, key=lambda r: r.get(metric, 0), reverse=True)[:top_n]
+        if not top_rows:
+            return "No data"
+        return "\n".join(f"{i+1}. {r['username']}: {r.get(metric,0)} {suffix}"
+                         for i, r in enumerate(top_rows))
 
+    total_text = format_top(formatted_rows, "total_score", "pts", top_n=5)
+    wins_text  = format_top(formatted_rows, "wins", "wins", top_n=5)
+    games_text = format_top(formatted_rows, "games_played", "games", top_n=5)
 
-    # 🥇 Top Wins
-    top_wins = df.sort_values("wins", ascending=False).head(5).reset_index(drop=True)
-    wins_text = "\n".join(
-        f"{i+1}. {row['display_name']}: {row['wins']} wins"
-        for i, row in top_wins.iterrows()
-    )
-
-    # 🎮 Most Games Played
-    top_games = df.sort_values("games_played", ascending=False).head(5).reset_index(drop=True)
-    games_text = "\n".join(
-        f"{i+1}. {row['display_name']}: {row['games_played']} games"
-        for i, row in top_games.iterrows()
-    )
-    
     leaderboard_message = (
-        "📊 *Quiz Leaderboard*\n\n"
-        "🏆 *All-time Points:*\n" + total_text + "\n\n" +
-        "🥇 *Most Wins:*\n" + wins_text + "\n\n" +
-        "🎮 *Most Games Played:*\n" + games_text
+        "📊 <b>Quiz Leaderboard</b>\n\n"
+        f"🏆 <b>All-time Points:</b>\n{total_text}\n\n"
+        f"🥇 <b>Most Wins:</b>\n{wins_text}\n\n"
+        f"🎮 <b>Most Games Played:</b>\n{games_text}"
     )
 
-    await update.message.reply_text(leaderboard_message, parse_mode="MarkdownV2")
+    await update.message.reply_text(leaderboard_message, parse_mode="HTML")
+
 
 
 async def log_all_messages(update: Update, context: CallbackContext):

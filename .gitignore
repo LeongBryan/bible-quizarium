@@ -1,5 +1,6 @@
 # Secret files
 bible-quizarium-93d3f0de44fa.json
+k8s/secrets.yaml
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

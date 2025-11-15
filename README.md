@@ -15,12 +15,15 @@
 
 ## Deploy to Kubernetes local cluster
 1. Populate the Secret object with API key
-2. Create Namespace, Deployment, pvc, Secret:
+2. Populate the Secret object with postgresDB credentials
+3. Create mount path `/mnt/data/postgres`
+4. Create Namespace, Deployment, pvc, Secret:
 ```bash
-k create ns telegram-bot
-k -n telegram-bot apply -f k8s/deployment.yaml
-k -n telegram-bot apply -f k8s/pvc.yaml
-k -n telegram-bot apply -f k8s/secret.yaml
+k create ns bible-quizarium
+k -n bible-quizarium apply -f k8s/cnph.yaml
+k -n bible-quizarium apply -f k8s/deployment.yaml
+k -n bible-quizarium apply -f k8s/pvc.yaml
+k -n bible-quizarium apply -f k8s/secres.yaml
 ```
 
 ## TODO:

@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: telegram-bot
-  namespace: telegram-bot
+  namespace: bible-quizarium
 spec:
   replicas: 1
   selector:
@@ -13,20 +13,87 @@ spec:
       labels:
         app: telegram-bot
     spec:
+      volumes:
+        - name: git-repo
+          emptyDir: {}  # shared between both containers
+
+      initContainers:
+        - name: git-clone
+          image: registry.k8s.io/git-sync/git-sync:v4.2.3
+          command: ["/git-sync"]
+          args:
+            - "--repo=https://github.com/LeongBryan/bible-quizarium.git"
+            - "--branch=main"
+            - "--root=/git"
+            - "--depth=1"
+            - "--one-time"
+          volumeMounts:
+            - name: git-repo
+              mountPath: /git
+
       containers:
+        - name: git-sync
+          image: registry.k8s.io/git-sync/git-sync:v4.2.3
+          volumeMounts:
+            - name: git-repo
+              mountPath: /git
+          env:
+            - name: GIT_SYNC_REPO
+              value: "https://github.com/LeongBryan/bible-quizarium.git"
+            - name: GIT_SYNC_BRANCH
+              value: "main"
+            - name: GIT_SYNC_ROOT
+              value: "/git"
+            - name: GIT_SYNC_WAIT
+              value: "60"  # seconds between pulls
+            - name: GIT_SYNC_ONE_TIME
+              value: "false"
+            - name: GIT_SYNC_DEPTH
+              value: "1"
+            - name: GIT_SYNC_ADD_USER
+              value: "true"
+            - name: GIT_SYNC_SUBDIR
+              value: "app"
+
         - name: bot
           image: python:3.12-slim
-          workingDir: /app
+          workingDir: /git/bible-quizarium.git/app  # code will be cloned here
+          volumeMounts:
+            - name: git-repo
+              mountPath: /git
           command: ["/bin/sh", "-c"]
           args:
-            - "pip install --no-cache-dir -r requirements.txt && python main.py"
+            - >
+              pip install --no-cache-dir -r requirements.txt &&
+              python main.py
           envFrom:
-            - secretRef:
-                name: telegram-bot-secret
-          volumeMounts:
-            - name: bot-code
-              mountPath: /app
-      volumes:
-        - name: bot-code
-          persistentVolumeClaim:
-            claimName: telegram-bot-pvc
+          - secretRef:
+              name: telegram-bot-secret
+          - secretRef:
+              name: postgres-credentials
+          env:
+            - name: DB_MODE
+              value: "postgres"
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: password
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: database
+            - name: DB_HOST
+              value: "telegram-leaderboard-db"
+            - name: DB_PORT
+              value: "5432"
+            - name: DATABASE_URL
+              value: "postgresql://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)"
+
+

@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: leaderboard-db
+  namespace: bible-quizarium
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: leaderboard-db
+  template:
+    metadata:
+      labels:
+        app: leaderboard-db
+    spec:
+      containers:
+        - name: postgres
+          image: bitnamilegacy/postgresql:17.6.0-debian-12-r4
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: password
+            - name: POSTGRES_DB
+              value: leaderboard
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - mountPath: /bitnami/postgresql
+              name: postgres-data
+      volumes:
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: postgres-pvc

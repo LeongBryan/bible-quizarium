@@ -1,23 +1,25 @@
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: telegram-bot-pv
+  name: postgres-pv
 spec:
   capacity:
-    storage: 200Mi
+    storage: 2Gi
   accessModes:
     - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-storage
   hostPath:
-    path: /home/pi/telegram-bot-data
+    path: /mnt/data/postgres # Folder on your Pi
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: telegram-bot-pvc
-  namespace: telegram-bot
+  name: postgres-pvc
 spec:
   accessModes:
     - ReadWriteOnce
+  storageClassName: local-storage
   resources:
     requests:
-      storage: 200Mi
+      storage: 2Gi
