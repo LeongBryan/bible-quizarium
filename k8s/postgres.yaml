@@ -38,3 +38,17 @@ spec:
         - name: postgres-data
           persistentVolumeClaim:
             claimName: postgres-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: telegram-leaderboard-db
+  namespace: bible-quizarium
+spec:
+  selector:
+    app: leaderboard-db
+  ports:
+    - port: 5432
+      targetPort: 5432
+      protocol: TCP
+  type: ClusterIP
